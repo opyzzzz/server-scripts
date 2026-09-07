@@ -4,6 +4,12 @@ set -uo pipefail
 # =============================================================================
 # Alpine SSH Final Repair for Incus + Podman
 #
+# 2026-09-07 修正版：
+#   - 修复 Incus exec 直接执行 shell builtin `command -v` 导致 cloud-init 误判
+#   - cloud-init first boot 真正完成后再进入最终验证
+#   - 模板 DNS 最终检查增加最多约 60 秒重试与失败诊断
+#   - 修复 `if ! timeout ...; RC=$?` 导致 cloud-init clean 返回码失真
+#
 # 适用场景：
 #   - 同一宿主机只有 Incus
 #   - 同一宿主机只有 Podman（rootful）
@@ -906,18 +912,22 @@ wait_cloud_init(){
     local i
     local status
 
-    # 非 cloud-init 镜像直接视为无需等待
+    # command 是 shell builtin，不能直接写成：
+    #   incus exec <ct> -- command -v cloud-init
+    # 必须交给容器内 shell 执行，否则会把已安装的 cloud-init 误判为不存在。
     if ! incus exec "$ct" -- \
-        command -v cloud-init \
+        sh -c 'command -v cloud-init >/dev/null 2>&1' \
         </dev/null >/dev/null 2>&1
     then
         echo "CLOUD_INIT=NOT_INSTALLED"
         return 0
     fi
 
+    echo "CLOUD_INIT=INSTALLED"
     echo "等待 cloud-init 完成..."
 
-    # 最长约 300 秒
+    # 最长约 300 秒。cloud-init first boot 的网络、DataSourceLXD、
+    # cloud-config/cloud-final 都完成后才继续做 DNS/SSH 最终验证。
     for i in $(seq 1 150); do
 
         if incus exec "$ct" -- \
@@ -936,15 +946,26 @@ wait_cloud_init(){
         )"
 
         case "$status" in
-            *"status: done"*)
+            *"status: done"*|*"status: degraded done"*)
                 echo "CLOUD_INIT_STATUS=DONE"
                 return 0
                 ;;
-            *"status: error"*)
+            *"status: error"*|*"status: error - done"*)
                 echo "CLOUD_INIT_STATUS=ERROR"
                 return 2
                 ;;
+            *"status: disabled"*)
+                echo "CLOUD_INIT_STATUS=DISABLED"
+                return 3
+                ;;
         esac
+
+        # 每 10 秒输出一次当前状态，方便判断是 not started 还是 running。
+        if [ $((i % 5)) -eq 0 ]; then
+            printf 'CLOUD_INIT_WAIT=%ss STATUS=%s\n' \
+                "$((i * 2))" \
+                "${status:-UNKNOWN}"
+        fi
 
         sleep 2
     done
@@ -1150,7 +1171,11 @@ if command -v cloud-init >/dev/null 2>&1; then
     # cloud-init clean 是必要的 golden-image 清理步骤，但不能允许它无限卡住。
     if command -v timeout >/dev/null 2>&1; then
 
-        if ! timeout 30s cloud-init clean --logs >/dev/null 2>&1; then
+        # 不使用 `if ! command; then RC=$?`，因为 `!` 会反转返回码，
+        # 导致这里拿到的 RC 失真。直接在 if/else 中保存原命令退出码。
+        if timeout 30s cloud-init clean --logs >/dev/null 2>&1; then
+            :
+        else
             RC=$?
 
             # timeout 常见退出码 124；无论哪种失败都停止发布，
@@ -1162,13 +1187,17 @@ if command -v cloud-init >/dev/null 2>&1; then
     else
 
         # Alpine BusyBox 一般包含 timeout applet；如果 PATH 中没有，
-        # 尝试通过 busybox 调用。
-        if command -v busybox >/dev/null 2>&1 &&
-           busybox timeout 30 cloud-init clean --logs >/dev/null 2>&1
-        then
-            :
+        # 尝试通过 busybox 调用，并保留真实退出码。
+        if command -v busybox >/dev/null 2>&1; then
+            if busybox timeout 30 cloud-init clean --logs >/dev/null 2>&1; then
+                :
+            else
+                RC=$?
+                echo "CLOUD_INIT_CLEAN_FAILED_RC=$RC"
+                exit 31
+            fi
         else
-            echo "CLOUD_INIT_CLEAN_FAILED_RC=NO_TIMEOUT_OR_FAILED"
+            echo "CLOUD_INIT_CLEAN_FAILED_RC=NO_TIMEOUT_COMMAND"
             exit 31
         fi
 
@@ -1322,15 +1351,37 @@ verify_cloud_template_instance(){
     fi
 
     # 5. DNS
-    if incus exec "$ct" -- sh -c '
-        if command -v nslookup >/dev/null 2>&1; then
-            nslookup dl-cdn.alpinelinux.org >/dev/null 2>&1
-        else
-            ping -c1 -W3 dl-cdn.alpinelinux.org >/dev/null 2>&1
+    # first boot 时 DHCP / resolv.conf 可能晚于 sshd 就绪。
+    # 最多等待约 60 秒，避免 Alpine 3.24 因一次瞬时 DNS 失败误判整个模板。
+    for _ in $(seq 1 30); do
+        if incus exec "$ct" -- sh -c '
+            if command -v nslookup >/dev/null 2>&1; then
+                nslookup dl-cdn.alpinelinux.org >/dev/null 2>&1
+            else
+                ping -c1 -W3 dl-cdn.alpinelinux.org >/dev/null 2>&1
+            fi
+        ' </dev/null >/dev/null 2>&1
+        then
+            dns_ok=1
+            break
         fi
-    ' </dev/null >/dev/null 2>&1
-    then
-        dns_ok=1
+
+        sleep 2
+    done
+
+    if [ "$dns_ok" -ne 1 ]; then
+        echo "DNS_FINAL_CHECK=FAILED"
+        echo "===== DNS diagnostics ====="
+        incus exec "$ct" -- sh -c '
+            echo "--- /etc/resolv.conf ---"
+            cat /etc/resolv.conf 2>/dev/null || true
+            echo "--- IPv4 address ---"
+            ip -4 addr show 2>/dev/null || true
+            echo "--- IPv4 route ---"
+            ip -4 route 2>/dev/null || true
+            echo "--- DHCP/OpenRC network services ---"
+            rc-status -a 2>/dev/null | grep -Ei "network|dhcp|udhcpc" || true
+        ' </dev/null 2>/dev/null || true
     fi
 
     # 6. 新实例独立 HostKey
