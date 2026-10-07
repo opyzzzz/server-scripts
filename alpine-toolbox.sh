@@ -119,7 +119,7 @@ install_singbox() {
             die '请先安装 bash、curl 和 CA 证书。'
         fi
     fi
-    URL=https://raw.githubusercontent.com/caigouzi121380/singbox-deploy/main/install-singbox-yyds.sh
+    URL=https://raw.githubusercontent.com/opyzzzz/server-scripts/main/install-singbox-yyds.sh
     printf '下载并运行第三方 sing-box 安装脚本：%s\n' "$URL"
     DOWNLOAD=$(mktemp)
     trap 'rm -f "$DOWNLOAD"' EXIT
