@@ -3,11 +3,11 @@
 新增 `alpine-toolbox.sh`，提供独立的数字菜单，不合并或修改仓库原有脚本。以 root 身份在目标容器的交互终端运行：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/podcctv/server-scripts/main/alpine-toolbox.sh | sh
+curl -fsSL https://raw.githubusercontent.com/opyzzzz/server-scripts/main/alpine-toolbox.sh | sh
 ```
 
 - `1`：检测、安装 Alpine OpenSSH，开启 root 密码登录。二级菜单 `1` 保持原密码（默认），`2` 生成 10 位密码，保证包含大小写字母、数字及 `@%_+=` 中的符号，不含引号、反斜杠、美元符号、反引号等易引起转义或展开的字符。
-- `2`：补齐 Bash/curl 依赖，下载并运行 [上游 sing-box 安装脚本](https://github.com/caigouzi121380/singbox-deploy)。执行上游 main 最新代码，具体安装行为由上游维护；下载或语法检查失败时不执行。
+- `2`：补齐 Bash/curl 依赖，下载并运行仓库内的 `install-singbox-yyds.sh`。执行本仓库 main 最新代码，具体安装行为由上游维护；下载或语法检查失败时不执行。
 - `0`：退出。
 
 通过 `/dev/tty` 读取输入，支持 `curl | sh`；远程执行需分配终端（如 `ssh -t`）。Alpine 尚未安装 curl 时，先运行 `apk add --no-cache curl ca-certificates`。SSH 功能在当前 Alpine 系统内执行，不批量进入其他容器。
