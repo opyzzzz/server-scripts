@@ -22,7 +22,7 @@ SERVICE="/etc/systemd/system/abuse-guard-v36.service"
 TIMER="/etc/systemd/system/abuse-guard-v36.timer"
 
 # Automatic installer update
-UPDATE_SOURCE_URL="https://raw.githubusercontent.com/podcctv/server-scripts/refs/heads/main/install-abuse-guard.sh"
+UPDATE_SOURCE_URL="https://raw.githubusercontent.com/opyzzzz/server-scripts/main/install-abuse-guard.sh"
 UPDATER="/usr/local/sbin/abuse-guard-auto-update"
 UPDATE_SERVICE="/etc/systemd/system/abuse-guard-auto-update.service"
 UPDATE_TIMER="/etc/systemd/system/abuse-guard-auto-update.timer"
