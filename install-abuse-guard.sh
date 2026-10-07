@@ -1044,7 +1044,7 @@ HASH_FILE="$STATE_DIR/installer.sha256"
 LOCK_FILE="/run/abuse-guard-auto-update.lock"
 CACHE_FILE="$STATE_DIR/install-abuse-guard.latest.sh"
 
-DEFAULT_SOURCE_URL="https://raw.githubusercontent.com/podcctv/server-scripts/refs/heads/main/install-abuse-guard.sh"
+DEFAULT_SOURCE_URL="https://raw.githubusercontent.com/opyzzzz/server-scripts/main/install-abuse-guard.sh"
 CURRENT_VERSION="3.6"
 
 mkdir -p "$STATE_DIR"
