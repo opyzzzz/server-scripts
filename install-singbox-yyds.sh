@@ -367,7 +367,7 @@ install_singbox() {
         alpine)
             info "使用 Edge 仓库安装 sing-box"
             apk update || { err "apk update 失败"; exit 1; }
-            apk add --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community sing-box || {
+            apk add --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community sing-box || {
                 err "sing-box 安装失败"
                 exit 1
             }
@@ -389,7 +389,7 @@ install_singbox() {
         exit 1
     fi
 
-    INSTALLED_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
+    SING_BOX_BIN="$(command -v sing-box || true)"\n    if [ -z "$SING_BOX_BIN" ] || [ ! -x "$SING_BOX_BIN" ]; then\n        err "sing-box 安装后未找到可执行文件"\n        exit 1\n    fi\n\n    INSTALLED_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
     info "sing-box 安装成功: $INSTALLED_VERSION"
 }
 
@@ -731,7 +731,7 @@ setup_service() {
 
 name="sing-box"
 description="Sing-box Proxy Server"
-command="/usr/bin/sing-box"
+command="$SING_BOX_BIN"
 command_args="run -c /etc/sing-box/config.json"
 pidfile="/run/${RC_SVCNAME}.pid"
 command_background="yes"
@@ -782,7 +782,7 @@ Wants=network.target
 Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
-ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=__SING_BOX_BIN__ run -c /etc/sing-box/config.json
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10s
