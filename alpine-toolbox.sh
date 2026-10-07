@@ -120,7 +120,7 @@ install_singbox() {
         fi
     fi
     URL=https://raw.githubusercontent.com/opyzzzz/server-scripts/main/install-singbox-yyds.sh
-    printf '下载并运行第三方 sing-box 安装脚本：%s\n' "$URL"
+    printf '下载并运行本仓库 sing-box 安装脚本：%s\n' "$URL"
     DOWNLOAD=$(mktemp)
     trap 'rm -f "$DOWNLOAD"' EXIT
     trap 'exit 130' INT
