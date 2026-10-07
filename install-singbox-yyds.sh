@@ -367,10 +367,13 @@ install_singbox() {
         alpine)
             info "使用 Edge 仓库安装 sing-box"
             apk update || { err "apk update 失败"; exit 1; }
-            apk add --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community sing-box || {
-                err "sing-box 安装失败"
-                exit 1
-            }
+            if ! apk add --no-cache sing-box; then
+                info "当前 Alpine 软件源没有 sing-box，尝试 HTTPS Edge Community 源..."
+                apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community sing-box || {
+                    err "sing-box 安装失败"
+                    exit 1
+                }
+            fi
             ;;
         debian|redhat)
             bash <(curl -fsSL https://sing-box.app/install.sh) || {
@@ -384,467 +387,13 @@ install_singbox() {
             ;;
     esac
 
-    if ! command -v sing-box >/dev/null 2>&1; then
-        err "sing-box 安装后未找到可执行文件"
-        exit 1
-    fi
-
-    SING_BOX_BIN="$(command -v sing-box || true)"\n    if [ -z "$SING_BOX_BIN" ] || [ ! -x "$SING_BOX_BIN" ]; then\n        err "sing-box 安装后未找到可执行文件"\n        exit 1\n    fi\n\n    INSTALLED_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
-    info "sing-box 安装成功: $INSTALLED_VERSION"
-}
-
-install_singbox
-
-# -----------------------
-# 生成 Reality 密钥对（必须在 sing-box 安装之后）
-generate_reality_keys() {
-    if ! $ENABLE_REALITY && ! $ENABLE_ANYTLS; then
-        info "跳过 Reality 密钥生成（未选择 Reality 协议）"
-        return 0
-    fi
-    
-    info "生成 Reality 密钥对..."
-    
-    if ! command -v sing-box >/dev/null 2>&1; then
-        err "sing-box 未安装，无法生成 Reality 密钥"
-        exit 1
-    fi
-    
-    REALITY_KEYS=$(sing-box generate reality-keypair 2>&1) || {
-        err "生成 Reality 密钥失败"
-        exit 1
-    }
-    
-    REALITY_PK=$(echo "$REALITY_KEYS" | grep "PrivateKey" | awk '{print $NF}' | tr -d '\r')
-    REALITY_PUB=$(echo "$REALITY_KEYS" | grep "PublicKey" | awk '{print $NF}' | tr -d '\r')
-    REALITY_SID=$(sing-box generate rand 8 --hex 2>&1) || {
-        err "生成 Reality ShortID 失败"
-        exit 1
-    }
-    
-    if [ -z "$REALITY_PK" ] || [ -z "$REALITY_PUB" ] || [ -z "$REALITY_SID" ]; then
-        err "Reality 密钥生成结果为空"
-        exit 1
-    fi
-    
-    mkdir -p /etc/sing-box
-    echo -n "$REALITY_PUB" > /etc/sing-box/.reality_pub
-    echo -n "$REALITY_SID" > /etc/sing-box/.reality_sid
-    
-    info "Reality 密钥已生成"
-}
-
-generate_reality_keys
-
-# -----------------------
-# 生成 HY2/TUIC 自签证书(仅在需要时)
-generate_cert() {
-    if ! $ENABLE_HY2 && ! $ENABLE_TUIC; then
-        info "跳过证书生成(未选择 HY2 或 TUIC)"
-        return 0
-    fi
-    
-    info "生成 HY2/TUIC 自签证书..."
-    mkdir -p /etc/sing-box/certs
-    
-    if [ ! -f /etc/sing-box/certs/fullchain.pem ] || [ ! -f /etc/sing-box/certs/privkey.pem ]; then
-        openssl req -x509 -newkey rsa:2048 -nodes \
-          -keyout /etc/sing-box/certs/privkey.pem \
-          -out /etc/sing-box/certs/fullchain.pem \
-          -days 3650 \
-          -subj "/CN=www.bing.com" || {
-            err "证书生成失败"
-            exit 1
-        }
-        info "证书已生成"
-    else
-        info "证书已存在"
-    fi
-}
-
-generate_cert
-
-# -----------------------
-# 生成配置文件
-CONFIG_PATH="/etc/sing-box/config.json"
-
-create_config() {
-    info "生成配置文件: $CONFIG_PATH"
-
-    mkdir -p "$(dirname "$CONFIG_PATH")"
-
-    # 构建 inbounds 内容（使用临时文件避免字符串处理问题）
-    local TEMP_INBOUNDS="/tmp/singbox_inbounds_$.json"
-    > "$TEMP_INBOUNDS"
-    
-    local need_comma=false
-    
-    if $ENABLE_SS; then
-        cat >> "$TEMP_INBOUNDS" <<'INBOUND_SS'
-    {
-      "type": "shadowsocks",
-      "listen": "::",
-      "listen_port": PORT_SS_PLACEHOLDER,
-      "method": "METHOD_SS_PLACEHOLDER",
-      "password": "PSK_SS_PLACEHOLDER",
-      "tag": "ss-in"
-    }
-INBOUND_SS
-        sed -i "s|PORT_SS_PLACEHOLDER|$PORT_SS|g" "$TEMP_INBOUNDS"
-        sed -i "s|METHOD_SS_PLACEHOLDER|$SS_METHOD|g" "$TEMP_INBOUNDS"
-        sed -i "s|PSK_SS_PLACEHOLDER|$PSK_SS|g" "$TEMP_INBOUNDS"
-        need_comma=true
-    fi
-    
-    if $ENABLE_HY2; then
-        $need_comma && echo "," >> "$TEMP_INBOUNDS"
-        cat >> "$TEMP_INBOUNDS" <<'INBOUND_HY2'
-    {
-      "type": "hysteria2",
-      "tag": "hy2-in",
-      "listen": "::",
-      "listen_port": PORT_HY2_PLACEHOLDER,
-      "users": [
-        {
-          "password": "PSK_HY2_PLACEHOLDER"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "alpn": ["h3"],
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem"
-      }
-    }
-INBOUND_HY2
-        sed -i "s|PORT_HY2_PLACEHOLDER|$PORT_HY2|g" "$TEMP_INBOUNDS"
-        sed -i "s|PSK_HY2_PLACEHOLDER|$PSK_HY2|g" "$TEMP_INBOUNDS"
-        need_comma=true
-    fi
-    
-    if $ENABLE_TUIC; then
-        $need_comma && echo "," >> "$TEMP_INBOUNDS"
-        cat >> "$TEMP_INBOUNDS" <<'INBOUND_TUIC'
-    {
-      "type": "tuic",
-      "tag": "tuic-in",
-      "listen": "::",
-      "listen_port": PORT_TUIC_PLACEHOLDER,
-      "users": [
-        {
-          "uuid": "UUID_TUIC_PLACEHOLDER",
-          "password": "PSK_TUIC_PLACEHOLDER"
-        }
-      ],
-      "congestion_control": "bbr",
-      "tls": {
-        "enabled": true,
-        "alpn": ["h3"],
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem"
-      }
-    }
-INBOUND_TUIC
-        sed -i "s|PORT_TUIC_PLACEHOLDER|$PORT_TUIC|g" "$TEMP_INBOUNDS"
-        sed -i "s|UUID_TUIC_PLACEHOLDER|$UUID_TUIC|g" "$TEMP_INBOUNDS"
-        sed -i "s|PSK_TUIC_PLACEHOLDER|$PSK_TUIC|g" "$TEMP_INBOUNDS"
-        need_comma=true
-    fi
-    
-    if $ENABLE_REALITY; then
-        $need_comma && echo "," >> "$TEMP_INBOUNDS"
-        cat >> "$TEMP_INBOUNDS" <<'INBOUND_REALITY'
-    {
-      "type": "vless",
-      "tag": "vless-in",
-      "listen": "::",
-      "listen_port": PORT_REALITY_PLACEHOLDER,
-      "users": [
-        {
-          "uuid": "UUID_REALITY_PLACEHOLDER",
-          "flow": "xtls-rprx-vision"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "REALITY_SNI_PLACEHOLDER",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "REALITY_SNI_PLACEHOLDER",
-            "server_port": 443
-          },
-          "private_key": "REALITY_PK_PLACEHOLDER",
-          "short_id": ["REALITY_SID_PLACEHOLDER"]
-        }
-      }
-    }
-INBOUND_REALITY
-        sed -i "s|PORT_REALITY_PLACEHOLDER|$PORT_REALITY|g" "$TEMP_INBOUNDS"
-        sed -i "s|UUID_REALITY_PLACEHOLDER|$UUID|g" "$TEMP_INBOUNDS"
-        sed -i "s|REALITY_PK_PLACEHOLDER|$REALITY_PK|g" "$TEMP_INBOUNDS"
-        sed -i "s|REALITY_SID_PLACEHOLDER|$REALITY_SID|g" "$TEMP_INBOUNDS"
-        sed -i "s|REALITY_SNI_PLACEHOLDER|$REALITY_SNI|g" "$TEMP_INBOUNDS"
-        need_comma=true
-    fi
-
-    if $ENABLE_ANYTLS; then
-    $need_comma && echo "," >> "$TEMP_INBOUNDS"
-    cat >> "$TEMP_INBOUNDS" <<'INBOUND_ANYTLS'
-    {
-      "type": "anytls",
-      "tag": "anytls-in",
-      "listen": "::",
-      "listen_port": PORT_ANYTLS_PLACEHOLDER,
-      "users": [
-        {
-          "name": "ANYTLS_USER_PLACEHOLDER",
-          "password": "ANYTLS_PSK_PLACEHOLDER"
-        }
-      ],
-      "padding_scheme": [],
-      "tls": {
-        "enabled": true,
-        "server_name": "REALITY_SNI_PLACEHOLDER",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "REALITY_SNI_PLACEHOLDER",
-            "server_port": 443
-          },
-          "private_key": "REALITY_PK_PLACEHOLDER",
-          "short_id": [
-            "REALITY_SID_PLACEHOLDER"
-          ]
-        }
-      }
-    }
-INBOUND_ANYTLS
-
-    sed -i "s|PORT_ANYTLS_PLACEHOLDER|$PORT_ANYTLS|g" "$TEMP_INBOUNDS"
-    sed -i "s|ANYTLS_USER_PLACEHOLDER|$ANYTLS_USER|g" "$TEMP_INBOUNDS"
-    sed -i "s|ANYTLS_PSK_PLACEHOLDER|$ANYTLS_PSK|g" "$TEMP_INBOUNDS"
-    sed -i "s|REALITY_PK_PLACEHOLDER|$REALITY_PK|g" "$TEMP_INBOUNDS"
-    sed -i "s|REALITY_SID_PLACEHOLDER|$REALITY_SID|g" "$TEMP_INBOUNDS"
-    sed -i "s|REALITY_SNI_PLACEHOLDER|$REALITY_SNI|g" "$TEMP_INBOUNDS"
-
-    need_comma=true
-    fi
-
-    # 生成最终配置
-    cat > "$CONFIG_PATH" <<'CONFIG_HEAD'
-{
-  "log": {
-    "level": "info",
-    "timestamp": true
-  },
-  "ntp": {
-    "enabled": true,
-    "server": "time.apple.com",
-    "server_port": 123,
-    "interval": "30m"
-  },
-  "inbounds": [
-CONFIG_HEAD
-    
-    cat "$TEMP_INBOUNDS" >> "$CONFIG_PATH"
-    
-    cat >> "$CONFIG_PATH" <<'CONFIG_TAIL'
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct-out"
-    }
-  ]
-}
-CONFIG_TAIL
-
-    rm -f "$TEMP_INBOUNDS"
-
-    sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1 \
-       && info "配置文件验证通过" \
-       || warn "配置文件验证失败,但继续执行"
-
-    # 保存配置缓存（追加/覆盖）
-    cat > /etc/sing-box/.config_cache <<CACHEEOF
-ENABLE_SS=$ENABLE_SS
-ENABLE_HY2=$ENABLE_HY2
-ENABLE_TUIC=$ENABLE_TUIC
-ENABLE_REALITY=$ENABLE_REALITY
-ENABLE_ANYTLS=$ENABLE_ANYTLS
-CACHEEOF
-
-    $ENABLE_SS && cat >> /etc/sing-box/.config_cache <<CACHEEOF
-SS_PORT=$PORT_SS
-SS_PSK=$PSK_SS
-SS_METHOD=$SS_METHOD
-CACHEEOF
-
-    $ENABLE_HY2 && cat >> /etc/sing-box/.config_cache <<CACHEEOF
-HY2_PORT=$PORT_HY2
-HY2_PSK=$PSK_HY2
-CACHEEOF
-
-    $ENABLE_TUIC && cat >> /etc/sing-box/.config_cache <<CACHEEOF
-TUIC_PORT=$PORT_TUIC
-TUIC_UUID=$UUID_TUIC
-TUIC_PSK=$PSK_TUIC
-CACHEEOF
-
-    $ENABLE_REALITY && cat >> /etc/sing-box/.config_cache <<CACHEEOF
-REALITY_PORT=$PORT_REALITY
-REALITY_UUID=$UUID
-REALITY_PK=$REALITY_PK
-REALITY_SID=$REALITY_SID
-REALITY_PUB=$REALITY_PUB
-REALITY_SNI=$REALITY_SNI
-CACHEEOF
-
-    $ENABLE_ANYTLS && cat >> /etc/sing-box/.config_cache <<CACHEEOF
-ANYTLS_PORT=$PORT_ANYTLS
-ANYTLS_USER=$ANYTLS_USER
-ANYTLS_PSK=$ANYTLS_PSK
-CACHEEOF
-
-    # 全局写入 CUSTOM_IP（哪怕为空也写）
-    echo "CUSTOM_IP=$CUSTOM_IP" >> /etc/sing-box/.config_cache
-
-    info "配置缓存已保存到 /etc/sing-box/.config_cache"
-}
-
-# 调用配置生成
-create_config
-
-info "配置生成完成，准备设置服务..."
-
-# -----------------------
-# 设置服务
-setup_service() {
-    info "配置系统服务..."
-    
-    if [ "$OS" = "alpine" ]; then
-        SERVICE_PATH="/etc/init.d/sing-box"
-        
-        cat > "$SERVICE_PATH" <<'OPENRC'
-#!/sbin/openrc-run
-
-name="sing-box"
-description="Sing-box Proxy Server"
-command="$SING_BOX_BIN"
-command_args="run -c /etc/sing-box/config.json"
-pidfile="/run/${RC_SVCNAME}.pid"
-command_background="yes"
-output_log="/var/log/sing-box.log"
-error_log="/var/log/sing-box.err"
-# 自动拉起（程序崩溃、OOM、被 kill 后自动恢复）
-supervisor=supervise-daemon
-supervise_daemon_args="--respawn-max 0 --respawn-delay 5"
-
-depend() {
-    need net
-    after firewall
-}
-
-start_pre() {
-    checkpath --directory --mode 0755 /var/log
-    checkpath --directory --mode 0755 /run
-}
-OPENRC
-        
-        chmod +x "$SERVICE_PATH"
-        rc-update add sing-box default >/dev/null 2>&1 || warn "添加开机自启失败"
-        rc-service sing-box restart || {
-            err "服务启动失败"
-            tail -20 /var/log/sing-box.err 2>/dev/null || tail -20 /var/log/sing-box.log 2>/dev/null || true
-            exit 1
-        }
-        
-        sleep 2
-        if rc-service sing-box status >/dev/null 2>&1; then
-            info "✅ OpenRC 服务已启动"
-        else
-            err "服务状态异常"
-            exit 1
-        fi
-        
-    else
-        SERVICE_PATH="/etc/systemd/system/sing-box.service"
-        
-        cat > "$SERVICE_PATH" <<'SYSTEMD'
-[Unit]
-Description=Sing-box Proxy Server
-Documentation=https://sing-box.sagernet.org
-After=network.target nss-lookup.target
-Wants=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/etc/sing-box
-ExecStart=__SING_BOX_BIN__ run -c /etc/sing-box/config.json
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=10s
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-SYSTEMD
-        
-        systemctl daemon-reload
-        systemctl enable sing-box >/dev/null 2>&1
-        systemctl restart sing-box || {
-            err "服务启动失败"
-            journalctl -u sing-box -n 30 --no-pager
-            exit 1
-        }
-        
-        sleep 2
-        if systemctl is-active sing-box >/dev/null 2>&1; then
-            info "✅ Systemd 服务已启动"
-        else
-            err "服务状态异常"
-            exit 1
-        fi
-    fi
-    
-    info "服务配置完成: $SERVICE_PATH"
-}
-
-setup_service
-
-# -----------------------
-# 获取公网 IP
-get_public_ip() {
-    local ip=""
-    for url in \
-        "https://api.ipify.org" \
-        "https://ipinfo.io/ip" \
-        "https://ifconfig.me" \
-        "https://icanhazip.com" \
-        "https://ipecho.net/plain"; do
-        ip=$(curl -s --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]' || true)
-        if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "$ip"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# 如果用户提供了 CUSTOM_IP，则优先使用；否则自动检测出口 IP
-if [ -n "${CUSTOM_IP:-}" ]; then
-    PUB_IP="$CUSTOM_IP"
-    info "使用用户提供的连接IP或ddns域名 : $PUB_IP"
-else
-    PUB_IP=$(get_public_ip || echo "YOUR_SERVER_IP")
-    if [ "$PUB_IP" = "YOUR_SERVER_IP" ]; then
-        warn "无法获取公网 IP,请手动替换"
-    else
-        info "检测到公网 IP: $PUB_IP"
-    fi
+    SING_BOX_BIN="$(command -v sing-box || true)"
+if [ -z "$SING_BOX_BIN" ] || [ ! -x "$SING_BOX_BIN" ]; then
+    err "sing-box 安装后未找到可执行文件"
+    exit 1
 fi
+SING_BOX_BIN="$(readlink -f "$SING_BOX_BIN" 2>/dev/null || printf '%s' "$SING_BOX_BIN")"
+info "sing-box 可执行文件: $SING_BOX_BIN"
 
 # -----------------------
 # 生成链接(仅生成已选择的协议)
@@ -1449,7 +998,12 @@ esac
 
 info "安装 sing-box..."
 case "$OS" in
-    alpine) apk add --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community sing-box ;;
+    alpine)
+        apk add --no-cache sing-box || {
+            info "当前 Alpine 软件源没有 sing-box，尝试 HTTPS Edge Community 源..."
+            apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community sing-box || exit 1
+        }
+        ;;
     *) bash <(curl -fsSL https://sing-box.app/install.sh) ;;
 esac
 
@@ -1520,6 +1074,8 @@ supervise_daemon_args="--respawn-max 0 --respawn-delay 5"
 depend() { need net; }
 SVC
     chmod +x /etc/init.d/sing-box
+    sed -i "s|__SING_BOX_BIN__|$SING_BOX_BIN|g" /etc/init.d/sing-box
+    grep -q '__SING_BOX_BIN__' /etc/init.d/sing-box && { err "OpenRC sing-box 路径替换失败"; exit 1; } || true
     rc-update add sing-box default
     rc-service sing-box restart
 else
@@ -1534,6 +1090,8 @@ RestartSec=10s
 [Install]
 WantedBy=multi-user.target
 SYSTEMD
+    sed -i "s|__SING_BOX_BIN__|$SING_BOX_BIN|g" /etc/systemd/system/sing-box.service
+    grep -q '__SING_BOX_BIN__' /etc/systemd/system/sing-box.service && { err "systemd sing-box 路径替换失败"; exit 1; } || true
     systemctl daemon-reload
     systemctl enable sing-box
     systemctl restart sing-box
