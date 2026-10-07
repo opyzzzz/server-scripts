@@ -1449,9 +1449,12 @@ esac
 
 info "安装 sing-box..."
 case "$OS" in
-    alpine) apk add --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community sing-box ;;
+    alpine) apk add --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community sing-box ;;
     *) bash <(curl -fsSL https://sing-box.app/install.sh) ;;
 esac
+
+SING_BOX_BIN="$(command -v sing-box || true)"
+[ -n "$SING_BOX_BIN" ] && [ -x "$SING_BOX_BIN" ] || { err "未找到 sing-box 可执行文件"; exit 1; }
 
 UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "00000000-0000-0000-0000-000000000000")
 
@@ -1507,7 +1510,7 @@ if [ "$OS" = "alpine" ]; then
     cat > /etc/init.d/sing-box <<'SVC'
 #!/sbin/openrc-run
 name="sing-box"
-command="/usr/bin/sing-box"
+command="__SING_BOX_BIN__"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
 pidfile="/run/sing-box.pid"
@@ -1525,7 +1528,7 @@ else
 Description=Sing-box Relay
 After=network.target
 [Service]
-ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=__SING_BOX_BIN__ run -c /etc/sing-box/config.json
 Restart=on-failure
 RestartSec=10s
 [Install]
@@ -1535,6 +1538,8 @@ SYSTEMD
     systemctl enable sing-box
     systemctl restart sing-box
 fi
+
+sed -i "s|__SING_BOX_BIN__|$SING_BOX_BIN|g" /etc/init.d/sing-box /etc/systemd/system/sing-box.service 2>/dev/null || true
 
 PUB_IP=$(curl -s https://api.ipify.org 2>/dev/null || echo "YOUR_RELAY_IP")
 
